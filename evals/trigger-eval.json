@@ -1,0 +1,20 @@
+[
+  {"query": "I just joined the team and I'm staring at this repo with no idea where anything lives — can you map out the architecture for me?", "should_trigger": true},
+  {"query": "can you build a knowledge graph of this codebase so I can show the team how the services fit together", "should_trigger": true},
+  {"query": "before you touch payment_service.py, can you show me everything that imports it so I know what I might break", "should_trigger": true},
+  {"query": "I want a diagram of how our modules depend on each other for the architecture review doc on friday", "should_trigger": true},
+  {"query": "new hire starts monday, can you put together something that shows how this repo is structured so onboarding is faster", "should_trigger": true},
+  {"query": "which files in this project are the most central / most depended-on? trying to figure out what's risky to refactor", "should_trigger": true},
+  {"query": "generate an interactive visualization of this repo's file dependencies that I can screen-share with the team", "should_trigger": true},
+  {"query": "instead of you reading every file every session, can we build something once that captures the repo structure so future sessions are faster", "should_trigger": true},
+  {"query": "can you fix the bug in payment_service.py where refunds double-charge the customer", "should_trigger": false},
+  {"query": "write unit tests for the new validateEmail function in utils.js", "should_trigger": false},
+  {"query": "can you draw me a sequence diagram of what happens when a user clicks checkout, step by step", "should_trigger": false},
+  {"query": "what does this specific function do, walk me through auth/login.py line by line", "should_trigger": false},
+  {"query": "create a slide deck summarizing our Q3 architecture decisions for leadership", "should_trigger": false},
+  {"query": "can you refactor this class to use dependency injection instead of the singleton pattern", "should_trigger": false},
+  {"query": "set up a GitHub Actions workflow that runs our test suite on every PR", "should_trigger": false},
+  {"query": "explain what a dependency graph is and why they're useful in software architecture, just curious", "should_trigger": false},
+  {"query": "review this PR and tell me if the changes look safe to merge", "should_trigger": false},
+  {"query": "our node_modules folder is huge, can you find what's taking up the most space", "should_trigger": false}
+]
