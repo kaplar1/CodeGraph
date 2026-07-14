@@ -45,6 +45,47 @@ Render the visual dashboard from the JSON:
 python3 .claude/skills/codegraph/scripts/render_dashboard.py .knowledge-graph/knowledge-graph.json --out .knowledge-graph/dashboard.html
 ```
 
+### Call graph (C/C++)
+
+Add `--calls` to also extract **who calls what** inside function bodies —
+e.g. `main.c::main` → `net.c::net_listen_init`, or `main.c::main` →
+`external::sigemptyset` for calls to library/OS functions that aren't
+defined anywhere in the scanned code (implies `--functions`):
+
+```
+python3 .claude/skills/codegraph/scripts/build_graph.py . --out .knowledge-graph --calls
+```
+
+Repeated calls to the same function collapse into one edge with a `count`,
+not one edge per call site. Resolution prefers a same-file match first
+(the common case for a local helper), falls back to an unambiguous
+cross-file match, and skips resolution entirely (rather than guessing)
+when a name is defined identically in more than a few files. By default,
+unresolved calls still show up as shared, deduplicated `external` nodes —
+pass `--calls-local-only` to drop those and show only calls that resolve
+to a function actually defined in the scanned code.
+
+**This can get big fast** — a full call graph across an entire real C
+codebase (Redis, ~217 files) produces over 30,000 edges. Two ways to keep
+it manageable:
+
+1. **Scope the scan to one file** instead of the whole repo — point
+   `build_graph.py` at a single source file instead of a directory.
+   Anything that file calls but doesn't itself define (whether a true
+   external library call or just a function defined elsewhere in the repo
+   you didn't include in this scan) is honestly reported as `external`,
+   the same way it would be for a real library call:
+
+   ```
+   python3 .claude/skills/codegraph/scripts/build_graph.py src/main.c --out .knowledge-graph --calls
+   ```
+
+2. **Use the dashboard's focus control** — click any node and use the
+   "Focus neighborhood" buttons (1 / 2 / 3 hops / All) to dim everything
+   outside that radius. The full graph stays in the JSON either way
+   (so Claude can still query all of it); this only affects what's
+   visually emphasized.
+
 After running, read `.knowledge-graph/ARCHITECTURE.md` and summarize the
 findings for the user (most central files, language mix, size). Offer to
 open or share `dashboard.html`.
@@ -98,3 +139,11 @@ the right moments in Claude Code.
   so their contents fall back to file-level attribution. Validated against
   real repos (Redis for C, nlohmann/json for C++, including its class
   hierarchy and 200+ overloaded/nested methods) with spot-checked output.
+- `--calls` (C/C++ only) resolves by bare name, not real type-aware
+  overload resolution — a call is matched against whichever function(s)
+  with that name are visible in the scanned scope, preferring a same-file
+  match. A name that's ambiguous across several files is skipped rather
+  than guessed. Call-site detection can't distinguish a real function call
+  from a function-style macro invocation or an unusual C++ functional
+  cast; both are still shown, since either way something identifiable is
+  being invoked at that point in the code.

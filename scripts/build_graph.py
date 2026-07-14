@@ -11,16 +11,25 @@ Outputs:
   <out>/ARCHITECTURE.md        — compact human/AI-readable summary
 
 Usage:
-  python3 build_graph.py [root_dir] [--out .knowledge-graph] [--functions]
+  python3 build_graph.py [root_dir_or_file] [--out .knowledge-graph] [--functions] [--calls] [--calls-local-only]
 
-  --functions   also emit function/class-level nodes (bigger graph)
+  --functions          include function/class-level nodes
+  --calls              also extract call edges between functions (implies --functions).
+                        Includes calls to external/library functions (e.g. libc, systemd)
+                        as shared "external" nodes by default.
+  --calls-local-only    with --calls, only include call edges that resolve to a function
+                        defined within the scanned scope; drop external/unresolved calls
+  root_dir_or_file      a directory (scans recursively, as before) or a single source
+                        file (scans just that file — useful for keeping a call graph
+                        readable; anything it calls that isn't defined in that one file
+                        is treated as external, same as a real external library call)
 """
 import argparse
 import json
 import os
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 DEFAULT_IGNORE_DIRS = {
@@ -134,6 +143,51 @@ _C_FUNC_DEF_RE = re.compile(
 _C_STRUCT_RE = re.compile(r'^\s*(?:typedef\s+)?struct\s+(\w+)', re.M)
 _CPP_CLASS_RE = re.compile(r'^\s*(?:template\s*<[^>]*>\s*)?class\s+(\w+)\b(?!\s*[=,>])', re.M)
 
+# Call-site heuristic: a bare identifier immediately followed by '(' —
+# e.g. "sigemptyset(&ss)" inside a function body. This is deliberately
+# permissive (it can't tell a real call from a function-style cast or a
+# macro invocation) but excludes control-flow keywords and common
+# primitive/type keywords that would otherwise read as calls to
+# themselves (e.g. "if (x)", "sizeof(x)", "int(x)" as a C++ cast).
+_CALL_SITE_RE = re.compile(r'\b([A-Za-z_]\w*)\s*\(')
+_CALL_EXCLUDE_WORDS = frozenset("""
+    if for while switch catch return sizeof else do new delete throw typedef
+    int char float double void long short unsigned signed bool
+    struct union enum const static extern inline volatile register auto goto
+    case default break continue alignof decltype noexcept explicit template
+    typename using namespace class public private protected friend virtual
+    operator this defined
+""".split())
+
+
+def extract_call_names(text):
+    """Count call-like identifier(...) occurrences in a block of text
+    (expected to already be comment/string-stripped). Returns a name -> count
+    Counter so repeated calls to the same function collapse to one edge with
+    a count, rather than one edge per call site."""
+    counts = Counter()
+    for m in _CALL_SITE_RE.finditer(text):
+        name = m.group(1)
+        if name not in _CALL_EXCLUDE_WORDS:
+            counts[name] += 1
+    return counts
+
+
+def _walk_brace_body(text, body_start):
+    """Given the position just after an opening '{', walk forward counting
+    brace balance and return the position of the matching '}' (or len(text)
+    if the braces never balance, e.g. malformed/truncated input)."""
+    depth = 1
+    i = body_start
+    n = len(text)
+    while i < n and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    return i - 1 if depth == 0 else n
+
 # Scope-opener variants of the above: these additionally require finding the
 # real opening '{' (non-greedily, so they land on the *nearest* one — the
 # scope's own body, not some unrelated later brace) and are used only to
@@ -179,6 +233,10 @@ def strip_c_strings(text):
 
 
 def iter_source_files(root, ignore_dirs):
+    if os.path.isfile(root):
+        if os.path.splitext(root)[1] in LANG_BY_EXT:
+            yield root
+        return
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in ignore_dirs and not d.startswith(".")]
         for fn in filenames:
@@ -225,16 +283,7 @@ def _find_scope_spans(text):
     ):
         for m in pattern.finditer(text):
             body_start = m.end()  # just after the opening '{'
-            depth = 1
-            i = body_start
-            n = len(text)
-            while i < n and depth > 0:
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                i += 1
-            body_end = i - 1 if depth == 0 else n
+            body_end = _walk_brace_body(text, body_start)
             openers.append({"name": m.group(1), "kind": kind, "start": body_start, "end": body_end})
     openers.sort(key=lambda o: o["start"])
     return openers
@@ -254,7 +303,8 @@ def extract_defs_with_scope(text, lang):
     of dicts: name, kind, qualified, parent (qualified name of the
     enclosing class/struct/namespace, or None if file-level)."""
     if lang not in ("c", "cpp"):
-        return [{"name": n, "kind": k, "qualified": n, "parent": None}
+        return [{"name": n, "kind": k, "qualified": n, "parent": None,
+                 "body_start": None, "body_end": None}
                 for n, k in extract_defs(text, lang)]
 
     scopes = _find_scope_spans(text)
@@ -264,14 +314,18 @@ def extract_defs_with_scope(text, lang):
         parents = _enclosing_chain(s["start"] - 1, scopes, exclude=s)
         qualified = "::".join([p["name"] for p in parents] + [s["name"]])
         parent_q = "::".join(p["name"] for p in parents) if parents else None
-        results.append({"name": s["name"], "kind": s["kind"], "qualified": qualified, "parent": parent_q})
+        results.append({"name": s["name"], "kind": s["kind"], "qualified": qualified, "parent": parent_q,
+                         "body_start": None, "body_end": None})
 
     for m in _C_FUNC_DEF_RE.finditer(text):
         pos = m.start(1)
         chain = _enclosing_chain(pos, scopes)
         qualified = "::".join([p["name"] for p in chain] + [m.group(1)])
         parent_q = "::".join(p["name"] for p in chain) if chain else None
-        results.append({"name": m.group(1), "kind": "function", "qualified": qualified, "parent": parent_q})
+        body_start = m.end()  # right after the opening '{', since the pattern ends with a literal '{'
+        body_end = _walk_brace_body(text, body_start)
+        results.append({"name": m.group(1), "kind": "function", "qualified": qualified, "parent": parent_q,
+                         "body_start": body_start, "body_end": body_end})
 
     return results
 
@@ -382,10 +436,14 @@ def resolve_import(raw_import, lang, file_dir, root, file_index, py_module_index
     return None
 
 
-def build_graph(root, include_functions=False):
+def build_graph(root, include_functions=False, include_calls=False, include_external_calls=True):
+    if include_calls:
+        include_functions = True  # calls are meaningless without function nodes to attach them to
+
     root = os.path.abspath(root)
+    scan_root = root if os.path.isdir(root) else os.path.dirname(root)
     files = list(iter_source_files(root, DEFAULT_IGNORE_DIRS))
-    file_index = {os.path.relpath(p, root).replace(os.sep, "/") for p in files}
+    file_index = {os.path.relpath(p, scan_root).replace(os.sep, "/") for p in files}
 
     nodes = []
     edges = []
@@ -394,7 +452,7 @@ def build_graph(root, include_functions=False):
 
     file_records = []
     for path in files:
-        rel = os.path.relpath(path, root).replace(os.sep, "/")
+        rel = os.path.relpath(path, scan_root).replace(os.sep, "/")
         ext = os.path.splitext(path)[1]
         lang = LANG_BY_EXT.get(ext, "unknown")
         text = read_text(path)
@@ -402,14 +460,19 @@ def build_graph(root, include_functions=False):
         if lang in ("c", "cpp"):
             comment_free = strip_c_comments(text)
             imports = extract_imports(comment_free, lang)
-            defs = extract_defs_with_scope(strip_c_strings(comment_free), lang)
+            text_for_defs = strip_c_strings(comment_free)
+            defs = extract_defs_with_scope(text_for_defs, lang)
         else:
             imports = extract_imports(text, lang)
+            text_for_defs = text
             defs = extract_defs_with_scope(text, lang)
         lang_counts[lang] += 1
-        file_records.append((rel, lang, loc, imports, defs))
+        file_records.append((rel, lang, loc, imports, defs, text_for_defs))
 
-    for rel, lang, loc, imports, defs in file_records:
+    name_index = defaultdict(list)   # bare function name -> [{"node_id":, "rel":}]
+    call_sources = []                # functions with a body span, to scan for call sites later
+
+    for rel, lang, loc, imports, defs, text_for_defs in file_records:
         nodes.append({
             "id": rel, "type": "file", "language": lang, "loc": loc,
             "defines": [{"name": d["name"], "kind": d["kind"]} for d in defs],
@@ -429,18 +492,51 @@ def build_graph(root, include_functions=False):
                 else:
                     edges.append({"source": rel, "target": node_id, "type": "defines"})
 
+                if d["kind"] == "function":
+                    name_index[d["name"]].append({"node_id": node_id, "rel": rel})
+                    if include_calls and d["body_start"] is not None:
+                        call_sources.append({
+                            "node_id": node_id, "rel": rel,
+                            "body": text_for_defs[d["body_start"]:d["body_end"]],
+                        })
+
     py_module_index = build_python_module_index(root, file_index)
     header_index = build_header_index(file_index)
 
-    for rel, lang, loc, imports, defs in file_records:
-        file_dir = os.path.dirname(os.path.join(root, rel))
+    for rel, lang, loc, imports, defs, text_for_defs in file_records:
+        file_dir = os.path.dirname(os.path.join(scan_root, rel))
         seen = set()
         for raw in imports:
-            target = resolve_import(raw, lang, file_dir, root, file_index, py_module_index, header_index)
+            target = resolve_import(raw, lang, file_dir, scan_root, file_index, py_module_index, header_index)
             if target and target != rel and target not in seen:
                 edges.append({"source": rel, "target": target, "type": "imports"})
                 indegree[target] += 1
                 seen.add(target)
+
+    if include_calls:
+        AMBIGUOUS_CAP = 3  # same name defined in more than this many files -> too generic to guess, skip
+        external_seen = set()
+        for src in call_sources:
+            call_counts = extract_call_names(src["body"])
+            for called_name, count in call_counts.items():
+                candidates = name_index.get(called_name, [])
+                same_file = [c for c in candidates if c["rel"] == src["rel"]]
+                if same_file:
+                    targets = [c["node_id"] for c in same_file]
+                elif candidates and len(candidates) <= AMBIGUOUS_CAP:
+                    targets = [c["node_id"] for c in candidates]
+                elif candidates:
+                    targets = []  # too many same-named candidates across files to guess honestly
+                else:
+                    targets = []
+                if not targets and include_external_calls and candidates == []:
+                    ext_id = f"external::{called_name}"
+                    if ext_id not in external_seen:
+                        nodes.append({"id": ext_id, "type": "external", "name": called_name})
+                        external_seen.add(ext_id)
+                    targets = [ext_id]
+                for t in targets:
+                    edges.append({"source": src["node_id"], "target": t, "type": "calls", "count": count})
 
     for n in nodes:
         if n["type"] == "file":
@@ -453,7 +549,8 @@ def build_graph(root, include_functions=False):
     }
     graph = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "root": root,
+        "root": scan_root,
+        "scan_target": root,
         "stats": stats,
         "nodes": nodes,
         "edges": edges,
@@ -488,13 +585,21 @@ def write_architecture_md(graph, out_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("root", nargs="?", default=".")
+    ap.add_argument("root", nargs="?", default=".", help="directory to scan, or a single source file")
     ap.add_argument("--out", default=".knowledge-graph")
     ap.add_argument("--functions", action="store_true", help="include function/class-level nodes")
+    ap.add_argument("--calls", action="store_true", help="extract call edges between functions (implies --functions)")
+    ap.add_argument("--calls-local-only", action="store_true",
+                     help="with --calls, drop calls to anything outside the scanned scope instead of showing them as external nodes")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
-    graph = build_graph(args.root, include_functions=args.functions)
+    graph = build_graph(
+        args.root,
+        include_functions=args.functions,
+        include_calls=args.calls,
+        include_external_calls=not args.calls_local_only,
+    )
 
     json_path = os.path.join(args.out, "knowledge-graph.json")
     with open(json_path, "w") as f:

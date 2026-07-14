@@ -37,6 +37,10 @@ def bg_edge_exists_defines(graph, source, target):
     return edge_exists(graph, source, target, etype="defines")
 
 
+def bg_edge_exists_calls(graph, source, target):
+    return edge_exists(graph, source, target, etype="calls")
+
+
 def node(graph, node_id):
     return next((n for n in graph["nodes"] if n["id"] == node_id), None)
 
@@ -311,6 +315,102 @@ def test_cpp_overloaded_methods_get_distinct_node_ids(tmp_path):
     assert len(set(ids)) == 3  # all distinct
 
 
+# ---------- Call graph ----------
+
+def test_calls_extraction_basic(tmp_path):
+    write(tmp_path, "util.c", (
+        "int helper(void) { return 1; }\n"
+        "int main(void) { return helper(); }\n"
+    ))
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    assert bg_edge_exists_calls(graph, "util.c::main", "util.c::helper")
+
+
+def test_calls_prefers_same_file_match_over_cross_file(tmp_path):
+    write(tmp_path, "a.c", "int init(void) { return 1; }\nint run(void) { return init(); }\n")
+    write(tmp_path, "b.c", "int init(void) { return 2; }\n")
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    assert bg_edge_exists_calls(graph, "a.c::run", "a.c::init")
+    assert not bg_edge_exists_calls(graph, "a.c::run", "b.c::init")
+
+
+def test_calls_resolves_unambiguous_cross_file_match(tmp_path):
+    write(tmp_path, "main.c", '#include "net.h"\nint main(void) { return net_listen_init(); }\n')
+    write(tmp_path, "net.h", "int net_listen_init(void);\n")
+    write(tmp_path, "net.c", '#include "net.h"\nint net_listen_init(void) { return 0; }\n')
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    assert bg_edge_exists_calls(graph, "main.c::main", "net.c::net_listen_init")
+
+
+def test_calls_too_ambiguous_across_many_files_is_skipped(tmp_path):
+    # A generic name defined in many files can't be resolved by name alone;
+    # skip rather than guess wrong.
+    for i in range(5):
+        write(tmp_path, f"mod{i}.c", "int process(void) { return 0; }\n")
+    write(tmp_path, "caller.c", "int run(void) { return process(); }\n")
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    calls_out = [e for e in graph["edges"] if e["type"] == "calls" and e["source"] == "caller.c::run"]
+    assert calls_out == []  # too ambiguous: neither resolved nor external
+
+
+def test_calls_external_function_creates_one_shared_deduped_node(tmp_path):
+    write(tmp_path, "a.c", "void one(void) { log_msg(); }\nvoid two(void) { log_msg(); }\n")
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    ext_nodes = [n for n in graph["nodes"] if n["id"] == "external::log_msg"]
+    assert len(ext_nodes) == 1
+    assert bg_edge_exists_calls(graph, "a.c::one", "external::log_msg")
+    assert bg_edge_exists_calls(graph, "a.c::two", "external::log_msg")
+
+
+def test_calls_local_only_drops_external_calls(tmp_path):
+    write(tmp_path, "a.c", "void one(void) { log_msg(); }\n")
+    graph = bg.build_graph(str(tmp_path), include_calls=True, include_external_calls=False)
+    assert not any(n["id"] == "external::log_msg" for n in graph["nodes"])
+    assert not any(e["type"] == "calls" for e in graph["edges"])
+
+
+def test_calls_implies_functions_even_if_not_explicitly_requested(tmp_path):
+    write(tmp_path, "a.c", "void one(void) { two(); }\nvoid two(void) {}\n")
+    graph = bg.build_graph(str(tmp_path), include_functions=False, include_calls=True)
+    assert node(graph, "a.c::one") is not None
+    assert node(graph, "a.c::two") is not None
+
+
+def test_calls_repeated_in_same_function_are_counted_not_duplicated(tmp_path):
+    write(tmp_path, "a.c", "void log_msg(void) {}\nvoid run(void) { log_msg(); log_msg(); log_msg(); }\n")
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    matches = [e for e in graph["edges"] if e["type"] == "calls"
+               and e["source"] == "a.c::run" and e["target"] == "a.c::log_msg"]
+    assert len(matches) == 1
+    assert matches[0]["count"] == 3
+
+
+def test_calls_excludes_control_flow_keywords(tmp_path):
+    write(tmp_path, "a.c", (
+        "void run(int n) {\n"
+        "    if (n > 0) {\n"
+        "        for (int i = 0; i < n; i++) { helper(); }\n"
+        "    }\n"
+        "}\n"
+        "void helper(void) {}\n"
+    ))
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    call_targets = [e["target"] for e in graph["edges"] if e["type"] == "calls" and e["source"] == "a.c::run"]
+    assert call_targets == ["a.c::helper"]  # not "if" or "for"
+
+
+def test_single_file_scan_mode_analyzes_only_that_file(tmp_path):
+    write(tmp_path, "main.c", '#include "net.h"\nint main(void) { return net_listen_init(); }\n')
+    write(tmp_path, "net.h", "int net_listen_init(void);\n")
+    write(tmp_path, "net.c", "int net_listen_init(void) { return 0; }\n")
+    graph = bg.build_graph(str(tmp_path / "main.c"), include_calls=True)
+    assert graph["stats"]["file_count"] == 1
+    assert node(graph, "net.c") is None
+    # net_listen_init isn't defined within the single-file scan scope, so it's
+    # honestly reported as external rather than silently omitted or guessed.
+    assert bg_edge_exists_calls(graph, "main.c::main", "external::net_listen_init")
+
+
 # ---------- Cross-cutting ----------
 
 def test_ignore_dirs_excludes_node_modules_and_git(tmp_path):
@@ -333,7 +433,7 @@ def test_criticality_counts_incoming_edges(tmp_path):
 def test_graph_output_has_expected_top_level_shape(tmp_path):
     write(tmp_path, "a.py", "")
     graph = bg.build_graph(str(tmp_path))
-    assert set(graph.keys()) == {"generated_at", "root", "stats", "nodes", "edges"}
+    assert set(graph.keys()) == {"generated_at", "root", "scan_target", "stats", "nodes", "edges"}
     assert set(graph["stats"].keys()) == {"file_count", "edge_count", "languages"}
 
 
