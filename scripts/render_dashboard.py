@@ -261,11 +261,11 @@ def main():
     ap.add_argument("--out", default="dashboard.html")
     args = ap.parse_args()
 
-    with open(args.graph_json) as f:
+    with open(args.graph_json, encoding="utf-8") as f:
         graph = json.load(f)
 
     html = TEMPLATE.replace("__GRAPH_JSON__", json.dumps(graph))
-    with open(args.out, "w") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"Wrote {args.out} ({len(html)/1024:.0f} KB) — open it directly in a browser, no server needed.")
 

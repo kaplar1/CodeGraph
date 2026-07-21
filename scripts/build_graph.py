@@ -646,7 +646,7 @@ def write_architecture_md(graph, out_path):
         "instead of reading source files directly. Only open actual source files "
         "when you need implementation detail this graph doesn't capture."
     )
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -669,7 +669,7 @@ def main():
     )
 
     json_path = os.path.join(args.out, "knowledge-graph.json")
-    with open(json_path, "w") as f:
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump(graph, f, indent=2)
 
     md_path = os.path.join(args.out, "ARCHITECTURE.md")
