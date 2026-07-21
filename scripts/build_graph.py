@@ -430,7 +430,7 @@ def resolve_import(raw_import, lang, file_dir, root, file_index, py_module_index
 
     for c in candidates:
         norm = os.path.normpath(os.path.join(root, c)) if not os.path.isabs(c) else c
-        rel = os.path.relpath(norm, root)
+        rel = os.path.relpath(norm, root).replace(os.sep, "/")
         if rel in file_index:
             return rel
     return None
