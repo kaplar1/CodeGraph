@@ -159,6 +159,58 @@ _CALL_EXCLUDE_WORDS = frozenset("""
     operator this defined
 """.split())
 
+# Best-effort C/POSIX standard-library function -> library name table, used
+# to group unresolved external calls by library instead of one node per
+# function (e.g. printf + fprintf both land on external::stdio). Not
+# exhaustive by design — anything not listed here falls back to a single
+# shared external::other bucket rather than guessing.
+_KNOWN_LIBRARY_FUNCTIONS = {
+    **{n: "stdio" for n in """
+        printf fprintf sprintf snprintf vprintf vfprintf vsnprintf
+        scanf fscanf sscanf fopen fclose fread fwrite fgets fputs fputc fgetc
+        getchar putchar puts gets perror fflush remove rename tmpfile
+        feof ferror rewind fseek ftell
+    """.split()},
+    **{n: "stdlib" for n in """
+        malloc calloc realloc free exit abort atoi atol atof
+        strtol strtoul strtod rand srand qsort bsearch getenv setenv system
+    """.split()},
+    **{n: "string" for n in """
+        strcpy strncpy strcat strncat strcmp strncmp strlen strchr strrchr
+        strstr strtok memcpy memmove memset memcmp strdup
+    """.split()},
+    **{n: "unistd" for n in """
+        read write close open fork execve execvp execv pipe dup dup2
+        sleep usleep getpid getppid unlink access
+    """.split()},
+    **{n: "pthread" for n in """
+        pthread_create pthread_join pthread_mutex_init pthread_mutex_lock
+        pthread_mutex_unlock pthread_mutex_destroy pthread_cond_init
+        pthread_cond_wait pthread_cond_signal pthread_cond_broadcast
+        pthread_exit pthread_detach pthread_cancel
+    """.split()},
+    **{n: "signal" for n in """
+        signal sigaction sigemptyset sigaddset sigdelset sigismember
+        sigprocmask kill raise sigwait sigsuspend
+    """.split()},
+    **{n: "socket" for n in """
+        socket bind listen accept connect send recv sendto recvfrom
+        setsockopt getsockopt shutdown htons htonl ntohs ntohl
+    """.split()},
+    **{n: "math" for n in """
+        sin cos tan asin acos atan atan2 sqrt pow log log10 log2 exp
+        fabs floor ceil round fmod
+    """.split()},
+    **{n: "time" for n in """
+        time difftime mktime localtime gmtime strftime clock gettimeofday
+        nanosleep
+    """.split()},
+    **{n: "ctype" for n in """
+        isalpha isdigit isspace isupper islower isalnum ispunct iscntrl
+        toupper tolower
+    """.split()},
+}
+
 
 def extract_call_names(text):
     """Count call-like identifier(...) occurrences in a block of text
@@ -518,6 +570,12 @@ def build_graph(root, include_functions=False, include_calls=False, include_exte
         external_seen = set()
         for src in call_sources:
             call_counts = extract_call_names(src["body"])
+            # Calls that don't resolve to any function defined in the scanned
+            # code are grouped by library (e.g. printf + fprintf -> stdio)
+            # so a function that calls several names from the same library
+            # gets one edge to one library node, not one edge per function
+            # name.
+            external_by_library = defaultdict(list)
             for called_name, count in call_counts.items():
                 candidates = name_index.get(called_name, [])
                 same_file = [c for c in candidates if c["rel"] == src["rel"]]
@@ -529,14 +587,23 @@ def build_graph(root, include_functions=False, include_calls=False, include_exte
                     targets = []  # too many same-named candidates across files to guess honestly
                 else:
                     targets = []
-                if not targets and include_external_calls and candidates == []:
-                    ext_id = f"external::{called_name}"
-                    if ext_id not in external_seen:
-                        nodes.append({"id": ext_id, "type": "external", "name": called_name})
-                        external_seen.add(ext_id)
-                    targets = [ext_id]
+                if not targets and candidates == []:
+                    if include_external_calls:
+                        library = _KNOWN_LIBRARY_FUNCTIONS.get(called_name, "other")
+                        external_by_library[library].append((called_name, count))
+                    continue
                 for t in targets:
                     edges.append({"source": src["node_id"], "target": t, "type": "calls", "count": count})
+            for library, calls in external_by_library.items():
+                ext_id = f"external::{library}"
+                if ext_id not in external_seen:
+                    nodes.append({"id": ext_id, "type": "external", "name": library})
+                    external_seen.add(ext_id)
+                edges.append({
+                    "source": src["node_id"], "target": ext_id, "type": "calls",
+                    "count": sum(c for _, c in calls),
+                    "functions": [{"name": n, "count": c} for n, c in sorted(calls)],
+                })
 
     for n in nodes:
         if n["type"] == "file":

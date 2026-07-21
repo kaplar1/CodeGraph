@@ -29,7 +29,7 @@ Add `--functions` to also map individual functions/classes (for C/C++, this prop
 python3 scripts/build_graph.py . --out .knowledge-graph --functions
 ```
 
-Add `--calls` to also map function-to-function call edges (C/C++), including calls out to external/library functions like `sigemptyset` or `fprintf` — resolvable calls point at the real definition, everything else becomes a shared `external` node. Point it at a single file instead of a directory to keep a call graph readable:
+Add `--calls` to also map function-to-function call edges (C/C++), including calls out to external/library functions like `sigemptyset` or `fprintf` — resolvable calls point at the real definition, everything else is grouped by library into a shared node (e.g. `external::stdio`, `external::signal`), with the actual function names called kept on the edge. Point it at a single file instead of a directory to keep a call graph readable:
 
 ```bash
 python3 scripts/build_graph.py src/main.c --out .knowledge-graph --calls

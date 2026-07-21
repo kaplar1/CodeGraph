@@ -49,8 +49,8 @@ python3 .claude/skills/codegraph/scripts/render_dashboard.py .knowledge-graph/kn
 
 Add `--calls` to also extract **who calls what** inside function bodies —
 e.g. `main.c::main` → `net.c::net_listen_init`, or `main.c::main` →
-`external::sigemptyset` for calls to library/OS functions that aren't
-defined anywhere in the scanned code (implies `--functions`):
+`external::stdio` for calls to library/OS functions that aren't defined
+anywhere in the scanned code (implies `--functions`):
 
 ```
 python3 .claude/skills/codegraph/scripts/build_graph.py . --out .knowledge-graph --calls
@@ -60,10 +60,22 @@ Repeated calls to the same function collapse into one edge with a `count`,
 not one edge per call site. Resolution prefers a same-file match first
 (the common case for a local helper), falls back to an unambiguous
 cross-file match, and skips resolution entirely (rather than guessing)
-when a name is defined identically in more than a few files. By default,
-unresolved calls still show up as shared, deduplicated `external` nodes —
-pass `--calls-local-only` to drop those and show only calls that resolve
-to a function actually defined in the scanned code.
+when a name is defined identically in more than a few files.
+
+Calls that don't resolve to anything defined in the scanned code are
+grouped **by library, not by function** — a function that calls both
+`printf` and `fprintf` gets one `calls` edge to a single `external::stdio`
+node, not two edges to two per-function nodes, since one function calling
+several names from the same header is the common case and one-node-per-
+function would otherwise dominate the graph. That edge carries a
+`functions` list (each called name plus its own call count) so the detail
+is still there, just consolidated rather than exploded into separate
+edges. Library grouping is a small best-effort table of common C/POSIX
+standard-library functions (stdio, stdlib, string, unistd, pthread,
+signal, socket, math, time, ctype); anything not in that table falls back
+to a single shared `external::other` node rather than guessing a library.
+Pass `--calls-local-only` to drop external calls entirely and show only
+calls that resolve to a function actually defined in the scanned code.
 
 **This can get big fast** — a full call graph across an entire real C
 codebase (Redis, ~217 files) produces over 30,000 edges. Two ways to keep
@@ -147,3 +159,8 @@ the right moments in Claude Code.
   from a function-style macro invocation or an unusual C++ functional
   cast; both are still shown, since either way something identifiable is
   being invoked at that point in the code.
+- The function → library table behind external-call grouping is a small
+  hand-picked list of common C/POSIX standard-library names, not a real
+  header/symbol database — a third-party library's functions will land in
+  the catch-all `external::other` node alongside anything else unmapped,
+  rather than getting their own library node.

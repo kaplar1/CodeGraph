@@ -354,19 +354,56 @@ def test_calls_too_ambiguous_across_many_files_is_skipped(tmp_path):
 
 
 def test_calls_external_function_creates_one_shared_deduped_node(tmp_path):
+    # log_msg isn't a known standard-library function, so it falls back to
+    # the shared "other" bucket rather than getting its own node.
     write(tmp_path, "a.c", "void one(void) { log_msg(); }\nvoid two(void) { log_msg(); }\n")
     graph = bg.build_graph(str(tmp_path), include_calls=True)
-    ext_nodes = [n for n in graph["nodes"] if n["id"] == "external::log_msg"]
+    ext_nodes = [n for n in graph["nodes"] if n["id"] == "external::other"]
     assert len(ext_nodes) == 1
-    assert bg_edge_exists_calls(graph, "a.c::one", "external::log_msg")
-    assert bg_edge_exists_calls(graph, "a.c::two", "external::log_msg")
+    assert bg_edge_exists_calls(graph, "a.c::one", "external::other")
+    assert bg_edge_exists_calls(graph, "a.c::two", "external::other")
 
 
 def test_calls_local_only_drops_external_calls(tmp_path):
     write(tmp_path, "a.c", "void one(void) { log_msg(); }\n")
     graph = bg.build_graph(str(tmp_path), include_calls=True, include_external_calls=False)
-    assert not any(n["id"] == "external::log_msg" for n in graph["nodes"])
+    assert not any(n["type"] == "external" for n in graph["nodes"])
     assert not any(e["type"] == "calls" for e in graph["edges"])
+
+
+def test_calls_to_same_library_consolidate_into_one_edge(tmp_path):
+    # printf and fprintf are both stdio: one function calling both should
+    # produce a single edge to external::stdio, not two separate edges to
+    # per-function nodes.
+    write(tmp_path, "a.c", "void run(void) { printf(\"hi\"); fprintf(stderr, \"x\"); }\n")
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    assert len([n for n in graph["nodes"] if n["id"] == "external::stdio"]) == 1
+    matches = [e for e in graph["edges"] if e["type"] == "calls"
+               and e["source"] == "a.c::run" and e["target"] == "external::stdio"]
+    assert len(matches) == 1
+    assert matches[0]["count"] == 2
+    names = {f["name"] for f in matches[0]["functions"]}
+    assert names == {"printf", "fprintf"}
+
+
+def test_calls_to_different_libraries_create_separate_library_nodes(tmp_path):
+    write(tmp_path, "a.c", "void run(void) { printf(\"hi\"); void *p = malloc(4); }\n")
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    assert bg_edge_exists_calls(graph, "a.c::run", "external::stdio")
+    assert bg_edge_exists_calls(graph, "a.c::run", "external::stdlib")
+
+
+def test_calls_repeated_within_library_edge_are_counted_per_function(tmp_path):
+    write(tmp_path, "a.c", (
+        "void run(void) { printf(\"a\"); printf(\"b\"); printf(\"c\"); fprintf(stderr, \"x\"); }\n"
+    ))
+    graph = bg.build_graph(str(tmp_path), include_calls=True)
+    matches = [e for e in graph["edges"] if e["type"] == "calls"
+               and e["source"] == "a.c::run" and e["target"] == "external::stdio"]
+    assert len(matches) == 1
+    assert matches[0]["count"] == 4
+    counts = {f["name"]: f["count"] for f in matches[0]["functions"]}
+    assert counts == {"printf": 3, "fprintf": 1}
 
 
 def test_calls_implies_functions_even_if_not_explicitly_requested(tmp_path):
@@ -407,8 +444,10 @@ def test_single_file_scan_mode_analyzes_only_that_file(tmp_path):
     assert graph["stats"]["file_count"] == 1
     assert node(graph, "net.c") is None
     # net_listen_init isn't defined within the single-file scan scope, so it's
-    # honestly reported as external rather than silently omitted or guessed.
-    assert bg_edge_exists_calls(graph, "main.c::main", "external::net_listen_init")
+    # honestly reported as external (falling back to the shared "other"
+    # bucket, since it's not a known standard-library function) rather than
+    # silently omitted or guessed.
+    assert bg_edge_exists_calls(graph, "main.c::main", "external::other")
 
 
 # ---------- Cross-cutting ----------

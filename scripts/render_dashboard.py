@@ -29,6 +29,7 @@ TEMPLATE = """<!DOCTYPE html>
   #detail .path { font-weight:600; word-break:break-all; }
   #detail .row { color:var(--muted); margin-top:6px; }
   #detail ul { margin:6px 0; padding-left:18px; }
+  #detail .fns { color:var(--muted); font-size:11px; }
   .legend { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; font-size:12px; }
   .legend span { display:flex; align-items:center; gap:4px; }
   .dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
@@ -190,12 +191,25 @@ function listItem(id) {
   return `<li>${label}</li>`;
 }
 
+// A "calls" edge into a library node (e.g. external::stdio) can represent
+// several distinct function names collapsed onto one edge (see `functions`
+// on the edge) - show that breakdown instead of just the library name.
+function callEdgeItem(l) {
+  const n = nodesById.get(l.target.id);
+  const label = n && n.type === 'external' ? n.name + ' (external)' : l.target.id;
+  const countSuffix = l.count ? ` &times;${l.count}` : '';
+  const fns = l.functions && l.functions.length
+    ? `<div class="fns">${l.functions.map(f => f.count > 1 ? `${f.name} &times;${f.count}` : f.name).join(', ')}</div>`
+    : '';
+  return `<li>${label}${countSuffix}${fns}</li>`;
+}
+
 function showDetail(d) {
   const { out, into } = neighborsOf(d.id);
   const importedBy = into.filter(l => l.type === 'imports').map(l => l.source.id);
   const importsList = out.filter(l => l.type === 'imports').map(l => l.target.id);
   const calledBy = into.filter(l => l.type === 'calls').map(l => l.source.id);
-  const calls = out.filter(l => l.type === 'calls').map(l => l.target.id);
+  const callEdges = out.filter(l => l.type === 'calls');
   const memberOf = into.filter(l => l.type === 'defines').map(l => l.source.id);
 
   let html = `<div class="path">${d.type === 'external' ? d.name : d.id}</div>`;
@@ -209,7 +223,7 @@ function showDetail(d) {
   if (d.defines && d.defines.length) {
     html += `<div class="row">defines:</div><ul>${d.defines.slice(0,40).map(x=>`<li>${x.kind} ${x.name}</li>`).join('')}</ul>`;
   }
-  if (calls.length) html += `<div class="row">calls:</div><ul>${calls.slice(0,30).map(listItem).join('')}</ul>`;
+  if (callEdges.length) html += `<div class="row">calls:</div><ul>${callEdges.slice(0,30).map(callEdgeItem).join('')}</ul>`;
   if (calledBy.length) html += `<div class="row">called by:</div><ul>${calledBy.slice(0,30).map(listItem).join('')}</ul>`;
   if (importedBy.length) html += `<div class="row">imported by:</div><ul>${importedBy.slice(0,20).map(listItem).join('')}</ul>`;
   if (importsList.length) html += `<div class="row">imports:</div><ul>${importsList.slice(0,20).map(listItem).join('')}</ul>`;
